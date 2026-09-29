@@ -51,6 +51,18 @@ static const char* const kBlockedDirnames[] = {
     "addon.d", "init.d", "TWRP", nullptr
 };
 
+static const char* const kBlockedExactPaths[] = {
+    "/system/bin/install-recovery.sh",
+    "/sbin/recovery",
+    "/tmp/recovery.log",
+    nullptr
+};
+
+static const PrefixEntry kRecoveryPrefixes[] = {
+    PE("/cache/recovery/"),
+    {nullptr, 0}
+};
+
 static const PrefixEntry kDirParents[] = {
     PE("/system"), PE("/system/etc"),
     PE("/system_ext"), PE("/system_ext/etc"),
@@ -62,7 +74,8 @@ static const PrefixEntry kDirParents[] = {
 
 static const PrefixEntry kProcFilterKeywords[] = {
     PE("lineage"), PE("Lineage"), PE("crdroid"), PE("crDroid"),
-    PE("omnirom"), PE("aospa"),
+    PE("omnirom"), PE("aospa"), PE("axion"), PE("Axion"),
+    PE("lunaris"), PE("Lunaris"), PE("singularity"), PE("Singularity"),
     { nullptr, 0 }
 };
 
@@ -251,6 +264,14 @@ static bool is_rom_path(const char* path) {
         while (len > 1 && stack_buf[len - 1] == '/') len--;
         stack_buf[len] = '\0';
         clean = stack_buf;
+    }
+
+    for (const char* const* p = kBlockedExactPaths; *p; ++p) {
+        if (strcmp(clean, *p) == 0) return true;
+    }
+
+    for (const PrefixEntry* p = kRecoveryPrefixes; p->str; ++p) {
+        if (strncmp(clean, p->str, p->len) == 0) return true;
     }
 
     if (is_blocked_dir(clean)) return true;
@@ -645,7 +666,8 @@ int custom_rom_hide_filter_sepolicy(const char* path) {
     if (!match) { errno = saved_errno; return -1; }
 
     int mem_fd = filter_file_with(path, [](const char* line, void*) {
-        return strstr(line, "lineage") != nullptr;
+        return strstr(line, "lineage") != nullptr || strstr(line, "lunaris") != nullptr ||
+               strstr(line, "axion") != nullptr;
     }, write_line_raw, nullptr);
     errno = saved_errno;
     return mem_fd;
@@ -667,7 +689,7 @@ static const char* const kVintfFilterPaths[] = {
 };
 
 static const char* const kVintfFilterKeywords[] = {
-    "lineage", "Lineage", "crdroid", "crDroid", nullptr
+    "lineage", "Lineage", "crdroid", "crDroid", "lunaris", "Lunaris", "axion", "Axion", nullptr
 };
 #endif
 
@@ -719,8 +741,9 @@ int custom_rom_hide_filter_vintf(const char* path) {
 
 static const char* const kSpoofedEmptyProps[] = {
     "ro.crdroid.version", "ro.lineage.version", "ro.lineage.build.version", "ro.cm.build.version",
-    "ro.modversion", "init.svc_debug_pid.adb_root",
-    "init.svc.adb_root", "service.adb.root", nullptr
+    "ro.modversion", "ro.axion.version", "ro.lunaris.version", "ro.lunaris.build.version",
+    "ro.singularity.version", "init.svc_debug_pid.adb_root", "init.svc_debug_pid.adbd",
+    "init.svc.adb_root", "init.svc.adbd", "service.adb.root", nullptr
 };
 
 struct PropOverride { const char* name; const char* value; };
@@ -730,6 +753,8 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
+    {"persist.sys.usb.config", "mtp"},
+    {"sys.usb.config", "mtp"},
     {nullptr, nullptr}
 };
 
