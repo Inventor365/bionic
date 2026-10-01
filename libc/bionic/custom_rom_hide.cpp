@@ -30,7 +30,6 @@
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
-#include <sys/system_properties.h>
 #include <unistd.h>
 #include <private/android_filesystem_config.h>
 
@@ -52,31 +51,6 @@ static const char* const kBlockedDirnames[] = {
     "addon.d", "init.d", "TWRP", nullptr
 };
 
-static const char* const kBlockedExactPaths[] = {
-    "/system/bin/su",
-    "/system/xbin/su",
-    "/sbin/su",
-    "/system/sd/xbin/su",
-    "/system/bin/failsafe/su",
-    "/data/local/xbin/su",
-    "/data/local/bin/su",
-    "/data/local/su",
-    "/system/bin/.ext/su",
-    "/system/usr/we-need-root/su",
-    "/system/app/Superuser.apk",
-    "/system/etc/init.d/99SuperSUDaemon",
-    "/dev/com.koushikdutta.superuser.daemon/",
-    "/system/bin/install-recovery.sh",
-    "/sbin/recovery",
-    "/tmp/recovery.log",
-    nullptr
-};
-
-static const PrefixEntry kRecoveryPrefixes[] = {
-    PE("/cache/recovery/"),
-    {nullptr, 0}
-};
-
 static const PrefixEntry kDirParents[] = {
     PE("/system"), PE("/system/etc"),
     PE("/system_ext"), PE("/system_ext/etc"),
@@ -88,8 +62,7 @@ static const PrefixEntry kDirParents[] = {
 
 static const PrefixEntry kProcFilterKeywords[] = {
     PE("lineage"), PE("Lineage"), PE("crdroid"), PE("crDroid"),
-    PE("omnirom"), PE("aospa"), PE("axion"), PE("Axion"),
-    PE("lunaris"), PE("Lunaris"), PE("singularity"), PE("Singularity"),
+    PE("omnirom"), PE("aospa"),
     { nullptr, 0 }
 };
 
@@ -102,55 +75,20 @@ static const char* const kAllowlistedPackages[] = {
     nullptr
 };
 
-static const char* const kBlockedPackageNames[] = {
-    "com.rifsxd.ksunext",
-    "me.weishu.kernelsu",
-    "com.sukisu.ultra",
-    "com.resukisu.resukisu",
-    "io.github.a13e300.ksuwebui",
-    "com.topjohnwu.magisk",
-    "io.github.vvb2060.magisk",
-    "org.lsposed.manager",
-    "org.lsposed.lspatch",
-    "de.robv.android.xposed.installer",
-    "bin.mt.termex",
-    "bin.mt.plus",
-    "bin.mt.plus.canary",
-    "eu.chainfire.supersu",
-    "com.koushikdutta.superuser",
-    "com.noshufou.android.su",
-    "com.noshufou.android.su.elite",
-    "com.thirdparty.superuser",
-    "com.yellowes.su",
-    "com.kingroot.kinguser",
-    "com.kingo.root",
-    "com.smedialink.oneclickroot",
-    "com.zhiqupk.root.global",
-    "com.alephzain.framaroot",
-    "com.devadvance.rootcloak",
-    "com.devadvance.rootcloakplus",
-    "com.chelpus.lackypatch",
-    "com.chelpus.luckypatcher",
-    "lucky.patcher",
-    "com.dimonvideo.luckypatcher",
-    "me.bmax.apatch",
-    "com.bmax.apatch",
-    "me.weishu.exp",
-    "top.hookvip.pro",
-    "me.simpleHook",
-    "com.tsng.hidemyapplist",
-    "com.tsng.pzyhrx.hma",
-    "com.topmiaohan.hidebllist",
-    "zako.zako.zako",
-    "es.chiteroman.bootloaderspoofer",
-    "io.github.a13e300.tricky_store",
-    "io.github.a13e300.tricky_store.debug",
-    "com.xayah.databackup.foss",
-    "com.sevtinge.hyperceiler",
-    "com.omarea.vtools",
-    "moe.shizuku.privileged.api",
-    "com.coderstory.toolkit",
-    nullptr
+#define DM_MAJOR 253u
+
+struct PartitionDevEntry {
+    const char* path;
+    unsigned int dm_minor;
+};
+
+static const PartitionDevEntry kPartitionDmMap[] = {
+    { "/system",     0 },
+    { "/vendor",     1 },
+    { "/product",    2 },
+    { "/system_ext", 3 },
+    { "/odm",        4 },
+    { nullptr,       0 },
 };
 
 static _Atomic(uint64_t) g_substituted_fd_bits[HIDE_TRACKED_FD_WORD_COUNT];
@@ -300,45 +238,6 @@ static bool is_blocked_dir(const char* path) {
     return false;
 }
 
-static bool is_caller_package(const char* pkg) {
-    if (!pkg) return false;
-    int fd = raw_openat("/proc/self/cmdline", O_RDONLY);
-    if (fd < 0) return false;
-
-    char cmdline[256];
-    ssize_t n = raw_read(fd, cmdline, sizeof(cmdline) - 1);
-    raw_close(fd);
-    if (n <= 0) return false;
-
-    cmdline[n] = '\0';
-    if (char* colon = strchr(cmdline, ':')) *colon = '\0';
-    return strcmp(cmdline, pkg) == 0;
-}
-
-static bool is_blocked_package_path(const char* path) {
-    if (!path) return false;
-    for (const char* const* pkg = kBlockedPackageNames; *pkg; ++pkg) {
-        const char* hit = strstr(path, *pkg);
-        if (hit) {
-            char before = (hit == path) ? '/' : hit[-1];
-            char after = hit[strlen(*pkg)];
-            if ((before == '/' || before == '.') && (after == '/' || after == '\0' || after == '.')) {
-                if (is_caller_package(*pkg)) return false;
-                return true;
-            }
-        }
-    }
-    if (strstr(path, "/MT2") != nullptr) {
-        const char* hit = strstr(path, "/MT2");
-        char after = hit[4];
-        if (after == '/' || after == '\0') {
-            if (is_caller_package("bin.mt.termex")) return false;
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool is_rom_path(const char* path) {
     if (!path || path[0] != '/') return false;
 
@@ -352,16 +251,6 @@ static bool is_rom_path(const char* path) {
         while (len > 1 && stack_buf[len - 1] == '/') len--;
         stack_buf[len] = '\0';
         clean = stack_buf;
-    }
-
-    if (is_blocked_package_path(clean)) return true;
-
-    for (const char* const* p = kBlockedExactPaths; *p; ++p) {
-        if (strcmp(clean, *p) == 0) return true;
-    }
-
-    for (const PrefixEntry* p = kRecoveryPrefixes; p->str; ++p) {
-        if (strncmp(clean, p->str, p->len) == 0) return true;
     }
 
     if (is_blocked_dir(clean)) return true;
@@ -422,18 +311,6 @@ bool custom_rom_hide_should_block_at(int dirfd, const char* path) {
 bool custom_rom_hide_should_filter_dirent(int dirfd, const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
     if (!is_app_process()) return false;
-
-    for (const char* const* pkg = kBlockedPackageNames; *pkg; ++pkg) {
-        if (strcmp(name, *pkg) == 0) {
-            if (is_caller_package(*pkg)) return false;
-            return true;
-        }
-    }
-
-    if (strcmp(name, "MT2") == 0) {
-        if (is_caller_package("bin.mt.termex")) return false;
-        return true;
-    }
 
     bool name_match = false;
     for (const char* const* dn = kBlockedDirnames; *dn; ++dn) {
@@ -663,6 +540,16 @@ static void filter_cmdline(int mem_fd, char* content, size_t len) {
     raw_write(mem_fd, content, strnlen(content, len));
 }
 
+struct MountDm { const char* mnt; const char* dev; };
+static const MountDm kMountDm[] = {
+    { " /system ",     "/dev/block/dm-0" },
+    { " /vendor ",     "/dev/block/dm-1" },
+    { " /product ",    "/dev/block/dm-2" },
+    { " /system_ext ", "/dev/block/dm-3" },
+    { " /odm ",        "/dev/block/dm-4" },
+    { nullptr,         nullptr },
+};
+
 static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, void*) {
     char* rw_delim = strstr(line, ",rw,");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
@@ -671,6 +558,30 @@ static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, vo
     rw_delim = strstr(line, ",rw ");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
 
+    if (!strstr(line, "/dev/block/loop")) {
+        const char* replacement = nullptr;
+        for (const MountDm* m = kMountDm; m->mnt; ++m) {
+            if (strstr(line, m->mnt)) { replacement = m->dev; break; }
+        }
+        if (!replacement &&
+            (strstr(line, " / / ") || strstr(line, " / ext4") ||
+             strstr(line, " / erofs") || strstr(line, " / f2fs")))
+            replacement = "/dev/block/dm-0";
+
+        if (replacement) {
+            char* dev_start = strstr(line, "/dev/block/");
+            if (!dev_start) dev_start = strstr(line, "/dev/root");
+
+            if (dev_start) {
+                char* dev_end = strchr(dev_start, ' ');
+                if (!dev_end) dev_end = dev_start + strlen(dev_start);
+                raw_write(mem_fd, line, dev_start - line);
+                raw_write(mem_fd, replacement, strlen(replacement));
+                raw_write(mem_fd, dev_end, line_len - (dev_end - line));
+                return;
+            }
+        }
+    }
     raw_write(mem_fd, line, line_len);
 }
 
@@ -734,8 +645,7 @@ int custom_rom_hide_filter_sepolicy(const char* path) {
     if (!match) { errno = saved_errno; return -1; }
 
     int mem_fd = filter_file_with(path, [](const char* line, void*) {
-        return strstr(line, "lineage") != nullptr || strstr(line, "lunaris") != nullptr ||
-               strstr(line, "axion") != nullptr;
+        return strstr(line, "lineage") != nullptr;
     }, write_line_raw, nullptr);
     errno = saved_errno;
     return mem_fd;
@@ -757,7 +667,7 @@ static const char* const kVintfFilterPaths[] = {
 };
 
 static const char* const kVintfFilterKeywords[] = {
-    "lineage", "Lineage", "crdroid", "crDroid", "lunaris", "Lunaris", "axion", "Axion", nullptr
+    "lineage", "Lineage", "crdroid", "crDroid", nullptr
 };
 #endif
 
@@ -809,11 +719,8 @@ int custom_rom_hide_filter_vintf(const char* path) {
 
 static const char* const kSpoofedEmptyProps[] = {
     "ro.crdroid.version", "ro.lineage.version", "ro.lineage.build.version", "ro.cm.build.version",
-    "ro.modversion", "ro.rom.version", "ro.axion.version", "ro.lunaris.version", "ro.lunaris.build.version",
-    "ro.singularity.version", "ro.evolution.version", "ro.evolution.build.version",
-    "ro.evolution.display.version", "ro.build.flavor", "ro.build.description",
-    "init.svc_debug_pid.adb_root", "init.svc_debug_pid.adbd",
-    "init.svc.adb_root", "init.svc.adbd", "service.adb.root", nullptr
+    "ro.modversion", "init.svc_debug_pid.adb_root",
+    "init.svc.adb_root", "service.adb.root", nullptr
 };
 
 struct PropOverride { const char* name; const char* value; };
@@ -821,27 +728,8 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.debuggable", "0"},
     {"ro.build.type", "user"},
     {"ro.build.tags", "release-keys"},
-    {"ro.system.build.type", "user"},
-    {"ro.system.build.tags", "release-keys"},
-    {"ro.vendor.build.type", "user"},
-    {"ro.vendor.build.tags", "release-keys"},
-    {"ro.product.build.type", "user"},
-    {"ro.product.build.tags", "release-keys"},
-    {"ro.system_ext.build.type", "user"},
-    {"ro.system_ext.build.tags", "release-keys"},
-    {"ro.odm.build.type", "user"},
-    {"ro.odm.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
-    {"persist.sys.usb.config", "mtp"},
-    {"sys.usb.config", "mtp"},
-    {"ro.boot.verifiedbootstate", "green"},
-    {"vendor.boot.verifiedbootstate", "green"},
-    {"ro.boot.vbmeta.device_state", "locked"},
-    {"vendor.boot.vbmeta.device_state", "locked"},
-    {"ro.boot.flash.locked", "1"},
-    {"ro.boot.veritymode", "enforcing"},
-    {"ro.secureboot.lockstate", "locked"},
     {nullptr, nullptr}
 };
 
@@ -855,14 +743,6 @@ bool custom_rom_hide_should_spoof_prop(const char* name, char* value) {
     }
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
         if (strcmp(name, o->name) == 0) { strcpy(value, o->value); return true; }
-    }
-    if (strcmp(name, "ro.build.display.id") == 0) {
-        char build_id[PROP_VALUE_MAX];
-        int len = __system_property_get("ro.build.id", build_id);
-        if (len > 0) {
-            strcpy(value, build_id);
-            return true;
-        }
     }
     return false;
 }
@@ -889,14 +769,28 @@ bool custom_rom_hide_is_app_process() {
     return is_app_process();
 }
 
+static const PartitionDevEntry* find_partition_entry(const char* path) {
+    if (!path) return nullptr;
+    for (const PartitionDevEntry* e = kPartitionDmMap; e->path; ++e) {
+        if (strcmp(path, e->path) == 0) return e;
+    }
+    return nullptr;
+}
+
 void custom_rom_hide_spoof_stat(const char* path, struct stat* sb) {
     if (!is_app_process() || !path || !sb) return;
     if (strcmp(path, "/data/local/tmp") == 0) { sb->st_ino = 4223; return; }
+    const PartitionDevEntry* e = find_partition_entry(path);
+    if (e && major(sb->st_dev) != DM_MAJOR) sb->st_dev = makedev(DM_MAJOR, e->dm_minor);
 }
 
 void custom_rom_hide_spoof_statx(const char* path, struct statx* sx) {
-    (void)path;
-    (void)sx;
+    if (!is_app_process() || !path || !sx) return;
+    const PartitionDevEntry* e = find_partition_entry(path);
+    if (e && sx->stx_dev_major != DM_MAJOR) {
+        sx->stx_dev_major = DM_MAJOR;
+        sx->stx_dev_minor = e->dm_minor;
+    }
 }
 
 void custom_rom_hide_spoof_fd_stat(int fd, struct stat* sb) {
