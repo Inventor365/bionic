@@ -132,56 +132,35 @@ static const char* const kBlockedPackageNames[] = {
     nullptr
 };
 
-// Containers whose immediate child directory name is an app package id. A path is
-// only tested against kBlockedPackageNames when it falls under one of these, which
-// keeps the check off the hot path for every other open()/stat().
+// Markers whose immediate child component is an app package id, under ANY external
+// storage mount prefix (/sdcard, /storage/emulated/0, /storage/self/primary,
+// /mnt/user/<N>/emulated/0, /mnt/runtime/*/emulated/0, /data/media/0, ...). Matched
+// as a substring so we do not have to enumerate every mount view the kernel exposes.
+static const char* const kAppDataMarkers[] = {
+    "/Android/data/", "/Android/obb/", "/Android/media/", nullptr
+};
+
+// Internal app-data containers (no /Android/... marker). The child after the prefix
+// is the package id; for /data/user[_de]/ a userid segment precedes it.
 struct AppDataContainer { const char* prefix; bool skip_userid; };
 static const AppDataContainer kAppDataContainers[] = {
-    { "/data/data/",                        false },
-    { "/data/user/",                        true  },
-    { "/data/user_de/",                     true  },
-    { "/sdcard/Android/data/",              false },
-    { "/sdcard/Android/obb/",               false },
-    { "/storage/emulated/0/Android/data/",  false },
-    { "/storage/emulated/0/Android/obb/",   false },
-    { "/data/media/0/Android/data/",        false },
-    { "/data/media/0/Android/obb/",         false },
-    { nullptr,                              false },
+    { "/data/data/",     false },
+    { "/data/user/",     true  },
+    { "/data/user_de/",  true  },
+    { nullptr,           false },
 };
 
-// The same containers without the trailing slash, i.e. the directory whose entries
-// are package ids. Used to bound the readdir() filter. /data/user[_de]/<N> is handled
-// separately because the userid segment varies.
-static const char* const kAppDataContainerDirs[] = {
-    "/data/data",
-    "/sdcard/Android/data",
-    "/sdcard/Android/obb",
-    "/storage/emulated/0/Android/data",
-    "/storage/emulated/0/Android/obb",
-    "/data/media/0/Android/data",
-    "/data/media/0/Android/obb",
-    nullptr
-};
-
-// MT Manager's well-known probe directory, checked as an exact dir or child.
+// MT Manager's well-known probe directory under every common external-storage view.
 static const char* const kMtProbeRoots[] = {
-    "/sdcard/MT2", "/storage/emulated/0/MT2", "/data/media/0/MT2", nullptr
-};
-
-#define DM_MAJOR 253u
-
-struct PartitionDevEntry {
-    const char* path;
-    unsigned int dm_minor;
-};
-
-static const PartitionDevEntry kPartitionDmMap[] = {
-    { "/system",     0 },
-    { "/vendor",     1 },
-    { "/product",    2 },
-    { "/system_ext", 3 },
-    { "/odm",        4 },
-    { nullptr,       0 },
+    "/sdcard/MT2",
+    "/storage/emulated/0/MT2",
+    "/storage/self/primary/MT2",
+    "/mnt/user/0/emulated/0/MT2",
+    "/mnt/runtime/default/emulated/0/MT2",
+    "/mnt/runtime/read/emulated/0/MT2",
+    "/mnt/runtime/write/emulated/0/MT2",
+    "/data/media/0/MT2",
+    nullptr
 };
 
 static _Atomic(uint64_t) g_substituted_fd_bits[HIDE_TRACKED_FD_WORD_COUNT];
@@ -311,6 +290,11 @@ static const char* path_basename(const char* path) {
     return slash ? slash + 1 : path;
 }
 
+static bool str_ends_with(const char* s, const char* suffix) {
+    size_t ls = strlen(s), lx = strlen(suffix);
+    return ls >= lx && strcmp(s + ls - lx, suffix) == 0;
+}
+
 static bool path_parent_equals(const char* path, const char* parent, size_t plen) {
     if (strncmp(path, parent, plen) != 0) return false;
     return path[plen] == '/';
@@ -363,6 +347,16 @@ static bool pkg_segment_is_blocked(const char* seg, size_t seg_len) {
 // directly under a known app-data container. Bounded: the package list is only
 // consulted once a container prefix matches.
 static bool is_blocked_app_data_path(const char* clean) {
+    // External storage: match the /Android/data|obb|media/ marker under any mount view.
+    for (const char* const* mk = kAppDataMarkers; *mk; ++mk) {
+        const char* m = strstr(clean, *mk);
+        if (!m) continue;
+        const char* seg = m + strlen(*mk);
+        const char* end = strchr(seg, '/');
+        size_t seg_len = end ? static_cast<size_t>(end - seg) : strlen(seg);
+        if (pkg_segment_is_blocked(seg, seg_len)) return true;
+    }
+    // Internal app data: /data/data/<pkg>, /data/user[_de]/<N>/<pkg>.
     for (const AppDataContainer* c = kAppDataContainers; c->prefix; ++c) {
         size_t plen = strlen(c->prefix);
         if (strncmp(clean, c->prefix, plen) != 0) continue;
@@ -390,11 +384,12 @@ static bool is_mt_probe_path(const char* clean) {
     return false;
 }
 
+// A directory whose entries are package ids: /data/data, /data/user[_de]/<N>, or any
+// external-storage .../Android/{data,obb,media}. Used to bound the readdir() filter.
 static bool is_app_data_container_dir(const char* dir) {
-    for (const char* const* d = kAppDataContainerDirs; *d; ++d) {
-        if (strcmp(dir, *d) == 0) return true;
-    }
-    // /data/user/<N> and /data/user_de/<N> (exactly one segment after the prefix).
+    if (strcmp(dir, "/data/data") == 0) return true;
+    if (str_ends_with(dir, "/Android/data") || str_ends_with(dir, "/Android/obb") ||
+        str_ends_with(dir, "/Android/media")) return true;
     static const char* const user_prefixes[] = { "/data/user/", "/data/user_de/", nullptr };
     for (const char* const* p = user_prefixes; *p; ++p) {
         size_t pl = strlen(*p);
@@ -459,10 +454,18 @@ bool custom_rom_hide_should_block_at(int dirfd, const char* path) {
         size_t plen = strlen(path);
         bool candidate = plen > 0 && path[plen - 1] == '/';
         if (!candidate) {
+            // Relative probes such as fstatat(dirfd, "com.rifsxd.ksunext") or
+            // fstatat(sdcard_fd, "MT2") must still reconstruct the full path. Gate on
+            // the basename matching a hidden dirname, a blocked package, or MT2 so the
+            // readlink only happens for names we actually care about.
             const char* base = path_basename(path);
-            for (const char* const* dn = kBlockedDirnames; *dn; ++dn) {
-                if (strcmp(base, *dn) == 0) { candidate = true; break; }
+            for (const char* const* dn = kBlockedDirnames; *dn && !candidate; ++dn) {
+                if (strcmp(base, *dn) == 0) candidate = true;
             }
+            for (const char* const* pkg = kBlockedPackageNames; *pkg && !candidate; ++pkg) {
+                if (strcmp(base, *pkg) == 0) candidate = true;
+            }
+            if (!candidate && strcmp(base, "MT2") == 0) candidate = true;
         }
         if (candidate) {
             char dir_path[256];
@@ -743,16 +746,12 @@ static void filter_cmdline(int mem_fd, char* content, size_t len) {
     raw_write(mem_fd, content, strnlen(content, len));
 }
 
-struct MountDm { const char* mnt; const char* dev; };
-static const MountDm kMountDm[] = {
-    { " /system ",     "/dev/block/dm-0" },
-    { " /vendor ",     "/dev/block/dm-1" },
-    { " /product ",    "/dev/block/dm-2" },
-    { " /system_ext ", "/dev/block/dm-3" },
-    { " /odm ",        "/dev/block/dm-4" },
-    { nullptr,         nullptr },
-};
-
+// Only normalize rw->ro so writable system partitions don't leak. We deliberately do
+// NOT rewrite the backing device name/number: on dynamic-partition devices the real
+// devices are already stock-like (dm-verity, major 253), and faking the name here
+// while leaving mountinfo field 3 (major:minor) and stat()'s st_dev untouched is what
+// produced the "inconsistent mount" verdict in native detectors. Leaving all three at
+// their genuine, mutually-consistent values passes the cross-check.
 static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, void*) {
     char* rw_delim = strstr(line, ",rw,");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
@@ -761,30 +760,6 @@ static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, vo
     rw_delim = strstr(line, ",rw ");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
 
-    if (!strstr(line, "/dev/block/loop")) {
-        const char* replacement = nullptr;
-        for (const MountDm* m = kMountDm; m->mnt; ++m) {
-            if (strstr(line, m->mnt)) { replacement = m->dev; break; }
-        }
-        if (!replacement &&
-            (strstr(line, " / / ") || strstr(line, " / ext4") ||
-             strstr(line, " / erofs") || strstr(line, " / f2fs")))
-            replacement = "/dev/block/dm-0";
-
-        if (replacement) {
-            char* dev_start = strstr(line, "/dev/block/");
-            if (!dev_start) dev_start = strstr(line, "/dev/root");
-
-            if (dev_start) {
-                char* dev_end = strchr(dev_start, ' ');
-                if (!dev_end) dev_end = dev_start + strlen(dev_start);
-                raw_write(mem_fd, line, dev_start - line);
-                raw_write(mem_fd, replacement, strlen(replacement));
-                raw_write(mem_fd, dev_end, line_len - (dev_end - line));
-                return;
-            }
-        }
-    }
     raw_write(mem_fd, line, line_len);
 }
 
@@ -998,28 +973,17 @@ bool custom_rom_hide_is_app_process() {
     return is_app_process();
 }
 
-static const PartitionDevEntry* find_partition_entry(const char* path) {
-    if (!path) return nullptr;
-    for (const PartitionDevEntry* e = kPartitionDmMap; e->path; ++e) {
-        if (strcmp(path, e->path) == 0) return e;
-    }
-    return nullptr;
-}
-
 void custom_rom_hide_spoof_stat(const char* path, struct stat* sb) {
     if (!is_app_process() || !path || !sb) return;
     if (strcmp(path, "/data/local/tmp") == 0) { sb->st_ino = 4223; return; }
-    const PartitionDevEntry* e = find_partition_entry(path);
-    if (e && major(sb->st_dev) != DM_MAJOR) sb->st_dev = makedev(DM_MAJOR, e->dm_minor);
+    // No partition st_dev spoofing: the genuine dynamic-partition devices are already
+    // stock-like and must stay consistent with /proc/self/mountinfo (see
+    // write_spoofed_mount_line) to avoid "inconsistent mount" detection.
 }
 
 void custom_rom_hide_spoof_statx(const char* path, struct statx* sx) {
-    if (!is_app_process() || !path || !sx) return;
-    const PartitionDevEntry* e = find_partition_entry(path);
-    if (e && sx->stx_dev_major != DM_MAJOR) {
-        sx->stx_dev_major = DM_MAJOR;
-        sx->stx_dev_minor = e->dm_minor;
-    }
+    (void)path;
+    (void)sx;
 }
 
 void custom_rom_hide_spoof_fd_stat(int fd, struct stat* sb) {
