@@ -30,6 +30,7 @@
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 #include <private/android_filesystem_config.h>
 
@@ -52,6 +53,19 @@ static const char* const kBlockedDirnames[] = {
 };
 
 static const char* const kBlockedExactPaths[] = {
+    "/system/bin/su",
+    "/system/xbin/su",
+    "/sbin/su",
+    "/system/sd/xbin/su",
+    "/system/bin/failsafe/su",
+    "/data/local/xbin/su",
+    "/data/local/bin/su",
+    "/data/local/su",
+    "/system/bin/.ext/su",
+    "/system/usr/we-need-root/su",
+    "/system/app/Superuser.apk",
+    "/system/etc/init.d/99SuperSUDaemon",
+    "/dev/com.koushikdutta.superuser.daemon/",
     "/system/bin/install-recovery.sh",
     "/sbin/recovery",
     "/tmp/recovery.log",
@@ -91,13 +105,17 @@ static const char* const kAllowlistedPackages[] = {
 static const char* const kBlockedPackageNames[] = {
     "com.rifsxd.ksunext",
     "me.weishu.kernelsu",
+    "com.sukisu.ultra",
+    "com.resukisu.resukisu",
+    "io.github.a13e300.ksuwebui",
     "com.topjohnwu.magisk",
     "io.github.vvb2060.magisk",
     "org.lsposed.manager",
+    "org.lsposed.lspatch",
     "de.robv.android.xposed.installer",
-    "com.sukisu.ultra",
-    "com.resukisu.resukisu",
     "bin.mt.termex",
+    "bin.mt.plus",
+    "bin.mt.plus.canary",
     "eu.chainfire.supersu",
     "com.koushikdutta.superuser",
     "com.noshufou.android.su",
@@ -119,11 +137,19 @@ static const char* const kBlockedPackageNames[] = {
     "com.bmax.apatch",
     "me.weishu.exp",
     "top.hookvip.pro",
+    "me.simpleHook",
     "com.tsng.hidemyapplist",
     "com.tsng.pzyhrx.hma",
     "com.topmiaohan.hidebllist",
     "zako.zako.zako",
     "es.chiteroman.bootloaderspoofer",
+    "io.github.a13e300.tricky_store",
+    "io.github.a13e300.tricky_store.debug",
+    "com.xayah.databackup.foss",
+    "com.sevtinge.hyperceiler",
+    "com.omarea.vtools",
+    "moe.shizuku.privileged.api",
+    "com.coderstory.toolkit",
     nullptr
 };
 
@@ -396,6 +422,18 @@ bool custom_rom_hide_should_block_at(int dirfd, const char* path) {
 bool custom_rom_hide_should_filter_dirent(int dirfd, const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
     if (!is_app_process()) return false;
+
+    for (const char* const* pkg = kBlockedPackageNames; *pkg; ++pkg) {
+        if (strcmp(name, *pkg) == 0) {
+            if (is_caller_package(*pkg)) return false;
+            return true;
+        }
+    }
+
+    if (strcmp(name, "MT2") == 0) {
+        if (is_caller_package("bin.mt.termex")) return false;
+        return true;
+    }
 
     bool name_match = false;
     for (const char* const* dn = kBlockedDirnames; *dn; ++dn) {
@@ -771,8 +809,9 @@ int custom_rom_hide_filter_vintf(const char* path) {
 
 static const char* const kSpoofedEmptyProps[] = {
     "ro.crdroid.version", "ro.lineage.version", "ro.lineage.build.version", "ro.cm.build.version",
-    "ro.modversion", "ro.axion.version", "ro.lunaris.version", "ro.lunaris.build.version",
+    "ro.modversion", "ro.rom.version", "ro.axion.version", "ro.lunaris.version", "ro.lunaris.build.version",
     "ro.singularity.version", "ro.evolution.version", "ro.evolution.build.version",
+    "ro.evolution.display.version", "ro.build.flavor", "ro.build.description",
     "init.svc_debug_pid.adb_root", "init.svc_debug_pid.adbd",
     "init.svc.adb_root", "init.svc.adbd", "service.adb.root", nullptr
 };
@@ -786,6 +825,12 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.system.build.tags", "release-keys"},
     {"ro.vendor.build.type", "user"},
     {"ro.vendor.build.tags", "release-keys"},
+    {"ro.product.build.type", "user"},
+    {"ro.product.build.tags", "release-keys"},
+    {"ro.system_ext.build.type", "user"},
+    {"ro.system_ext.build.tags", "release-keys"},
+    {"ro.odm.build.type", "user"},
+    {"ro.odm.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
     {"persist.sys.usb.config", "mtp"},
@@ -810,6 +855,14 @@ bool custom_rom_hide_should_spoof_prop(const char* name, char* value) {
     }
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
         if (strcmp(name, o->name) == 0) { strcpy(value, o->value); return true; }
+    }
+    if (strcmp(name, "ro.build.display.id") == 0) {
+        char build_id[PROP_VALUE_MAX];
+        int len = __system_property_get("ro.build.id", build_id);
+        if (len > 0) {
+            strcpy(value, build_id);
+            return true;
+        }
     }
     return false;
 }
