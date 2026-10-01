@@ -62,7 +62,8 @@ static const PrefixEntry kDirParents[] = {
 
 static const PrefixEntry kProcFilterKeywords[] = {
     PE("lineage"), PE("Lineage"), PE("crdroid"), PE("crDroid"),
-    PE("omnirom"), PE("aospa"),
+    PE("omnirom"), PE("aospa"), PE("axion"), PE("Axion"),
+    PE("lunaris"), PE("Lunaris"), PE("singularity"), PE("Singularity"),
     { nullptr, 0 }
 };
 
@@ -73,6 +74,98 @@ static const char* const kMountFilterKeywords[] = {
 static const char* const kAllowlistedPackages[] = {
     "org.lineageos.updater",
     nullptr
+};
+
+// Root / hooking / detection-helper packages. Unlike the stock reference ROMs,
+// which do no app-level package hiding in libc, we hide these from app processes
+// ONLY when they are probed as a path component under a known app-data container
+// (see kAppDataContainers) or enumerated via readdir of such a container. We never
+// substring-scan arbitrary paths, so unrelated file opens pay nothing.
+static const char* const kBlockedPackageNames[] = {
+    "com.rifsxd.ksunext",
+    "me.weishu.kernelsu",
+    "com.sukisu.ultra",
+    "com.resukisu.resukisu",
+    "io.github.a13e300.ksuwebui",
+    "com.topjohnwu.magisk",
+    "io.github.vvb2060.magisk",
+    "org.lsposed.manager",
+    "org.lsposed.lspatch",
+    "de.robv.android.xposed.installer",
+    "bin.mt.termex",
+    "bin.mt.plus",
+    "bin.mt.plus.canary",
+    "eu.chainfire.supersu",
+    "com.koushikdutta.superuser",
+    "com.noshufou.android.su",
+    "com.noshufou.android.su.elite",
+    "com.thirdparty.superuser",
+    "com.yellowes.su",
+    "com.kingroot.kinguser",
+    "com.kingo.root",
+    "com.smedialink.oneclickroot",
+    "com.zhiqupk.root.global",
+    "com.alephzain.framaroot",
+    "com.devadvance.rootcloak",
+    "com.devadvance.rootcloakplus",
+    "com.chelpus.lackypatch",
+    "com.chelpus.luckypatcher",
+    "lucky.patcher",
+    "com.dimonvideo.luckypatcher",
+    "me.bmax.apatch",
+    "com.bmax.apatch",
+    "me.weishu.exp",
+    "top.hookvip.pro",
+    "me.simpleHook",
+    "com.tsng.hidemyapplist",
+    "com.tsng.pzyhrx.hma",
+    "com.topmiaohan.hidebllist",
+    "zako.zako.zako",
+    "es.chiteroman.bootloaderspoofer",
+    "io.github.a13e300.tricky_store",
+    "io.github.a13e300.tricky_store.debug",
+    "com.xayah.databackup.foss",
+    "com.sevtinge.hyperceiler",
+    "com.omarea.vtools",
+    "moe.shizuku.privileged.api",
+    "com.coderstory.toolkit",
+    nullptr
+};
+
+// Containers whose immediate child directory name is an app package id. A path is
+// only tested against kBlockedPackageNames when it falls under one of these, which
+// keeps the check off the hot path for every other open()/stat().
+struct AppDataContainer { const char* prefix; bool skip_userid; };
+static const AppDataContainer kAppDataContainers[] = {
+    { "/data/data/",                        false },
+    { "/data/user/",                        true  },
+    { "/data/user_de/",                     true  },
+    { "/sdcard/Android/data/",              false },
+    { "/sdcard/Android/obb/",               false },
+    { "/storage/emulated/0/Android/data/",  false },
+    { "/storage/emulated/0/Android/obb/",   false },
+    { "/data/media/0/Android/data/",        false },
+    { "/data/media/0/Android/obb/",         false },
+    { nullptr,                              false },
+};
+
+// The same containers without the trailing slash, i.e. the directory whose entries
+// are package ids. Used to bound the readdir() filter. /data/user[_de]/<N> is handled
+// separately because the userid segment varies.
+static const char* const kAppDataContainerDirs[] = {
+    "/data/data",
+    "/sdcard/Android/data",
+    "/sdcard/Android/obb",
+    "/storage/emulated/0/Android/data",
+    "/storage/emulated/0/Android/obb",
+    "/data/media/0/Android/data",
+    "/data/media/0/Android/obb",
+    nullptr
+};
+
+// MT Manager's well-known probe directory, checked as an exact dir or child.
+static const char* const kMtProbeRoots[] = {
+    "/sdcard/MT2", "/storage/emulated/0/MT2", "/data/media/0/MT2", nullptr
 };
 
 #define DM_MAJOR 253u
@@ -238,6 +331,81 @@ static bool is_blocked_dir(const char* path) {
     return false;
 }
 
+// Reads /proc/self/cmdline (package name) via raw syscalls so an app never hides
+// its own package from itself. Returns true when the calling process IS pkg.
+static bool is_caller_package(const char* pkg) {
+    if (!pkg) return false;
+    int fd = raw_openat("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return false;
+
+    char cmdline[256];
+    ssize_t n = raw_read(fd, cmdline, sizeof(cmdline) - 1);
+    raw_close(fd);
+    if (n <= 0) return false;
+
+    cmdline[n] = '\0';
+    if (char* colon = strchr(cmdline, ':')) *colon = '\0';
+    return strcmp(cmdline, pkg) == 0;
+}
+
+static bool pkg_segment_is_blocked(const char* seg, size_t seg_len) {
+    if (seg_len == 0) return false;
+    for (const char* const* pkg = kBlockedPackageNames; *pkg; ++pkg) {
+        if (strlen(*pkg) == seg_len && strncmp(seg, *pkg, seg_len) == 0) {
+            if (is_caller_package(*pkg)) return false;
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when clean resolves to (or into) a blocked package directory that lives
+// directly under a known app-data container. Bounded: the package list is only
+// consulted once a container prefix matches.
+static bool is_blocked_app_data_path(const char* clean) {
+    for (const AppDataContainer* c = kAppDataContainers; c->prefix; ++c) {
+        size_t plen = strlen(c->prefix);
+        if (strncmp(clean, c->prefix, plen) != 0) continue;
+        const char* seg = clean + plen;
+        if (c->skip_userid) {
+            const char* slash = strchr(seg, '/');
+            if (!slash) return false;
+            seg = slash + 1;
+        }
+        const char* end = strchr(seg, '/');
+        size_t seg_len = end ? static_cast<size_t>(end - seg) : strlen(seg);
+        return pkg_segment_is_blocked(seg, seg_len);
+    }
+    return false;
+}
+
+static bool is_mt_probe_path(const char* clean) {
+    for (const char* const* r = kMtProbeRoots; *r; ++r) {
+        size_t rl = strlen(*r);
+        if (strncmp(clean, *r, rl) == 0 && (clean[rl] == '\0' || clean[rl] == '/')) {
+            if (is_caller_package("bin.mt.termex")) return false;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_app_data_container_dir(const char* dir) {
+    for (const char* const* d = kAppDataContainerDirs; *d; ++d) {
+        if (strcmp(dir, *d) == 0) return true;
+    }
+    // /data/user/<N> and /data/user_de/<N> (exactly one segment after the prefix).
+    static const char* const user_prefixes[] = { "/data/user/", "/data/user_de/", nullptr };
+    for (const char* const* p = user_prefixes; *p; ++p) {
+        size_t pl = strlen(*p);
+        if (strncmp(dir, *p, pl) == 0) {
+            const char* rest = dir + pl;
+            if (*rest != '\0' && strchr(rest, '/') == nullptr) return true;
+        }
+    }
+    return false;
+}
+
 static bool is_rom_path(const char* path) {
     if (!path || path[0] != '/') return false;
 
@@ -254,6 +422,8 @@ static bool is_rom_path(const char* path) {
     }
 
     if (is_blocked_dir(clean)) return true;
+    if (is_blocked_app_data_path(clean)) return true;
+    if (is_mt_probe_path(clean)) return true;
     return false;
 }
 
@@ -312,15 +482,48 @@ bool custom_rom_hide_should_filter_dirent(int dirfd, const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
     if (!is_app_process()) return false;
 
+    int saved_errno = errno;
+
+    // Hide blocked root/hook package entries, but only when the directory being
+    // enumerated is a genuine app-data container (/data/data, /data/user/<N>,
+    // /sdcard/Android/data, ...). This answers readdir()/getdents() scans without
+    // affecting listings of unrelated directories.
+    for (const char* const* pkg = kBlockedPackageNames; *pkg; ++pkg) {
+        if (strcmp(name, *pkg) == 0) {
+            bool result = false;
+            if (!is_caller_package(*pkg)) {
+                char dir_path[256];
+                if (resolve_fd_path(dirfd, dir_path, sizeof(dir_path)) &&
+                    is_app_data_container_dir(dir_path)) {
+                    result = true;
+                }
+            }
+            errno = saved_errno;
+            return result;
+        }
+    }
+    if (strcmp(name, "MT2") == 0) {
+        bool result = false;
+        if (!is_caller_package("bin.mt.termex")) {
+            char dir_path[256];
+            if (resolve_fd_path(dirfd, dir_path, sizeof(dir_path)) &&
+                (strcmp(dir_path, "/sdcard") == 0 ||
+                 strcmp(dir_path, "/storage/emulated/0") == 0 ||
+                 strcmp(dir_path, "/data/media/0") == 0)) {
+                result = true;
+            }
+        }
+        errno = saved_errno;
+        return result;
+    }
+
     bool name_match = false;
     for (const char* const* dn = kBlockedDirnames; *dn; ++dn) {
         if (strcmp(name, *dn) == 0) { name_match = true; break; }
     }
-    if (!name_match) return false;
+    if (!name_match) { errno = saved_errno; return false; }
 
-    int saved_errno = errno;
     bool result = false;
-
     char dir_path[256];
     if (resolve_fd_path(dirfd, dir_path, sizeof(dir_path))) {
         for (const PrefixEntry* pp = kDirParents; pp->str; ++pp) {
@@ -645,7 +848,8 @@ int custom_rom_hide_filter_sepolicy(const char* path) {
     if (!match) { errno = saved_errno; return -1; }
 
     int mem_fd = filter_file_with(path, [](const char* line, void*) {
-        return strstr(line, "lineage") != nullptr;
+        return strstr(line, "lineage") != nullptr || strstr(line, "lunaris") != nullptr ||
+               strstr(line, "singularity") != nullptr || strstr(line, "axion") != nullptr;
     }, write_line_raw, nullptr);
     errno = saved_errno;
     return mem_fd;
@@ -667,7 +871,8 @@ static const char* const kVintfFilterPaths[] = {
 };
 
 static const char* const kVintfFilterKeywords[] = {
-    "lineage", "Lineage", "crdroid", "crDroid", nullptr
+    "lineage", "Lineage", "crdroid", "crDroid",
+    "lunaris", "Lunaris", "singularity", "Singularity", "axion", "Axion", nullptr
 };
 #endif
 
@@ -719,8 +924,12 @@ int custom_rom_hide_filter_vintf(const char* path) {
 
 static const char* const kSpoofedEmptyProps[] = {
     "ro.crdroid.version", "ro.lineage.version", "ro.lineage.build.version", "ro.cm.build.version",
-    "ro.modversion", "init.svc_debug_pid.adb_root",
-    "init.svc.adb_root", "service.adb.root", nullptr
+    "ro.modversion", "ro.rom.version",
+    "ro.axion.version", "ro.lunaris.version", "ro.lunaris.build.version", "ro.singularity.version",
+    "ro.evolution.version", "ro.evolution.build.version", "ro.evolution.display.version",
+    "ro.build.flavor", "ro.build.description",
+    "init.svc_debug_pid.adb_root", "init.svc_debug_pid.adbd",
+    "init.svc.adb_root", "init.svc.adbd", "service.adb.root", nullptr
 };
 
 struct PropOverride { const char* name; const char* value; };
@@ -728,8 +937,28 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.debuggable", "0"},
     {"ro.build.type", "user"},
     {"ro.build.tags", "release-keys"},
+    {"ro.system.build.type", "user"},
+    {"ro.system.build.tags", "release-keys"},
+    {"ro.vendor.build.type", "user"},
+    {"ro.vendor.build.tags", "release-keys"},
+    {"ro.product.build.type", "user"},
+    {"ro.product.build.tags", "release-keys"},
+    {"ro.system_ext.build.type", "user"},
+    {"ro.system_ext.build.tags", "release-keys"},
+    {"ro.odm.build.type", "user"},
+    {"ro.odm.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
+    // Boot state as a stock locked device reports it; mirrors the cmdline rewrite in
+    // filter_cmdline(). App processes only (see is_app_process()), so system_server's
+    // OemLock / PersistentDataBlock / verified-boot checks still see the genuine state.
+    {"ro.boot.verifiedbootstate", "green"},
+    {"vendor.boot.verifiedbootstate", "green"},
+    {"ro.boot.vbmeta.device_state", "locked"},
+    {"vendor.boot.vbmeta.device_state", "locked"},
+    {"ro.boot.flash.locked", "1"},
+    {"ro.boot.veritymode", "enforcing"},
+    {"ro.secureboot.lockstate", "locked"},
     {nullptr, nullptr}
 };
 
