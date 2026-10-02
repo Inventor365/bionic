@@ -924,10 +924,12 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.odm.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
-    // Detectors expect a normal USB function (e.g. "mtp"); "none" / adb-bearing values
-    // read as a debug/abnormal USB state. App processes only.
-    {"persist.sys.usb.config", "mtp"},
-    {"sys.usb.config", "mtp"},
+    // NOTE: persist.sys.usb.config / sys.usb.config are deliberately NOT spoofed here.
+    // Detectors read these from the raw property area (bypassing the libc read hooks),
+    // so a libc-level override cannot change the value they see and only introduces a
+    // getprop(hooked)-vs-rawread divergence ("Property source mismatch"). The correct
+    // place to normalize these is the real property value (device USB config), not the
+    // read path.
     // Boot state as a stock locked device reports it; mirrors the cmdline rewrite in
     // filter_cmdline(). App processes only (see is_app_process()), so system_server's
     // OemLock / PersistentDataBlock / verified-boot checks still see the genuine state.
