@@ -71,20 +71,8 @@ static const char* const kMountFilterKeywords[] = {
     "/debug_ramdisk", "overlay", "magisk", "ksu", "KSU", "ksud", "apatch", "/data/adb", nullptr
 };
 
-// Packages for which custom_rom_hide is fully disabled (is_app_process() returns
-// false, so every hook no-ops and libc behaves exactly like stock for them).
-//
-// Add apps whose own native anti-tamper probe inspects libc/path behavior and
-// treats our hiding hooks themselves as the anomaly. Navi UPI's "DetectAF"
-// native module flags app-Libc and then System.exit()s, even though it passes
-// TEE/keybox/attestation and Native Detector reports the environment as normal
-// -- i.e. it reacts to the hook BEHAVIOR, not to real root. With the hooks off,
-// its libc looks untouched; actual root (su, /data/adb, ksu/overlay mounts, the
-// ksud process) stays hidden by SELinux (untrusted_app denials) and the kernel
-// (susfs), which are what already keep it hidden from the banking apps that work.
 static const char* const kAllowlistedPackages[] = {
     "org.lineageos.updater",
-    "com.naviapp",
     nullptr
 };
 
