@@ -179,7 +179,31 @@ static const char* const kBlockedPackageNames[] = {
     "com.sevtinge.hyperceiler",
     "com.omarea.vtools",
     "moe.shizuku.privileged.api",
+    "com.rosan.dhizuku",
     "com.coderstory.toolkit",
+    // Kept in sync with AppsFilterBase ROOT_PACKAGES (PM-query layer). This
+    // dirent/data-path layer can be broader than the PM layer because hiding a
+    // directory entry never blocks service binding.
+    "com.solohsu.android.edxp.manager",
+    "org.meowcat.edxposed.manager",
+    "com.saurik.substrate",
+    "com.amphoras.hidemyroot",
+    "com.amphoras.hidemyrootadfree",
+    "com.formyhm.hiderootPremium",
+    "com.formyhm.hideroot",
+    "com.koushikdutta.rommanager",
+    "com.koushikdutta.rommanager.license",
+    "cc.madkite.freedom",
+    "com.ramdroid.appquarantine",
+    "com.ramdroid.appquarantinepro",
+    "com.zachspong.temprootremovejb",
+    "com.dergoogler.mmrl",
+    "com.dergoogler.mmrl.wx",
+    "com.valhalla.thor",
+    "io.github.huskydg.magisk",
+    "org.frknkrc44.hma_oss",
+    "com.google.android.hmal",
+    "cn.geektang.privacyspace",
     nullptr
 };
 
